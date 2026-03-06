@@ -36,6 +36,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showLabelManager, setShowLabelManager] = useState(true);
+  const [editingResult, setEditingResult] = useState<Partial<ExtractionResult> | null>(null);
   const [settings, setSettings] = useState<AppSettings>({
     apiKey: '',
     password: '',
@@ -365,7 +366,7 @@ export default function App() {
 
       console.log("Raw content from AI:", content);
       const extracted = extractJSON(content);
-      saveToHistory({
+      setEditingResult({
         nomComplet: extracted.nomComplet || '',
         appartement: extracted.appartement || '',
         adresse: extracted.adresse || '',
@@ -379,6 +380,19 @@ export default function App() {
       setStatus({ type: 'error', message: err.message || 'Échec de l\'extraction' });
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  const handleSaveEdited = () => {
+    if (editingResult) {
+      saveToHistory({
+        nomComplet: editingResult.nomComplet || '',
+        appartement: editingResult.appartement || '',
+        adresse: editingResult.adresse || '',
+        rawResponse: editingResult.rawResponse
+      });
+      setEditingResult(null);
+      setStatus({ type: 'success', message: 'Résultat enregistré dans l\'historique' });
     }
   };
 
@@ -950,6 +964,108 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+
+      {/* Result Editing Popup */}
+      <AnimatePresence>
+        {editingResult && (
+          <ResultPopup 
+            result={editingResult}
+            onSave={handleSaveEdited}
+            onClose={() => setEditingResult(null)}
+            onChange={(field, value) => setEditingResult(prev => prev ? { ...prev, [field]: value } : null)}
+          />
+        )}
+      </AnimatePresence>
     </>
   );
 }
+
+const ResultPopup = ({ 
+  result, 
+  onSave, 
+  onClose, 
+  onChange 
+}: { 
+  result: Partial<ExtractionResult>, 
+  onSave: () => void, 
+  onClose: () => void,
+  onChange: (field: keyof ExtractionResult, value: string) => void
+}) => {
+  return (
+    <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      <motion.div 
+        initial={{ opacity: 0, y: 20, scale: 0.95 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 20, scale: 0.95 }}
+        className="bg-white rounded-[32px] w-full max-w-md shadow-2xl border border-zinc-100 overflow-hidden"
+      >
+        <div className="p-6 border-b border-zinc-50 flex items-center justify-between bg-zinc-50/50">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 bg-emerald-100 rounded-lg flex items-center justify-center text-emerald-600">
+              <CheckCircle2 size={18} />
+            </div>
+            <h3 className="font-bold text-zinc-900">Résultat de l'Analyse</h3>
+          </div>
+          <button onClick={onClose} className="p-2 text-zinc-400 hover:text-zinc-900 transition-colors">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          <div>
+            <label className="block text-[10px] uppercase font-bold text-zinc-400 mb-1 ml-1">Nom Complet</label>
+            <input 
+              value={result.nomComplet || ''}
+              onChange={(e) => onChange('nomComplet', e.target.value)}
+              className="w-full px-4 py-3 rounded-2xl border border-zinc-100 focus:ring-2 focus:ring-emerald-500 outline-none font-medium text-zinc-900"
+              placeholder="Nom de la personne"
+            />
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[10px] uppercase font-bold text-zinc-400 mb-1 ml-1">Appartement</label>
+              <input 
+                value={result.appartement || ''}
+                onChange={(e) => onChange('appartement', e.target.value)}
+                className="w-full px-4 py-3 rounded-2xl border border-zinc-100 focus:ring-2 focus:ring-emerald-500 outline-none font-medium text-zinc-900"
+                placeholder="N° Appt"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase font-bold text-zinc-400 mb-1 ml-1">Code Postal / Ville</label>
+              <div className="w-full px-4 py-3 rounded-2xl bg-zinc-50 border border-zinc-100 text-zinc-400 text-xs flex items-center">
+                Auto-détecté
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-[10px] uppercase font-bold text-zinc-400 mb-1 ml-1">Adresse</label>
+            <textarea 
+              value={result.adresse || ''}
+              onChange={(e) => onChange('adresse', e.target.value)}
+              className="w-full px-4 py-3 rounded-2xl border border-zinc-100 focus:ring-2 focus:ring-emerald-500 outline-none font-medium text-zinc-900 min-h-[80px] resize-none"
+              placeholder="Adresse complète"
+            />
+          </div>
+        </div>
+
+        <div className="p-6 bg-zinc-50/50 flex gap-3">
+          <button 
+            onClick={onClose}
+            className="flex-1 py-4 rounded-2xl border border-zinc-200 font-bold text-zinc-500 hover:bg-white transition-all active:scale-95"
+          >
+            Fermer
+          </button>
+          <button 
+            onClick={onSave}
+            className="flex-1 py-4 rounded-2xl bg-zinc-900 text-white font-bold hover:bg-zinc-800 transition-all shadow-lg shadow-zinc-200 active:scale-95"
+          >
+            Enregistrer
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};

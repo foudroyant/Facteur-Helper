@@ -4,8 +4,9 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Image as ImageIcon, Settings, Lock, Send, CheckCircle2, AlertCircle, LogOut, Key, History, Download, Trash2, X } from 'lucide-react';
+import { Camera, Image as ImageIcon, Settings, Lock, Send, CheckCircle2, AlertCircle, LogOut, Key, History, Download, Trash2, X, Cpu, ScanLine } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import Tesseract from 'tesseract.js';
 
 // Types
 interface AppSettings {
@@ -16,9 +17,9 @@ interface AppSettings {
 interface ExtractionResult {
   id: string;
   timestamp: string;
-  nom: string;
-  prenom: string;
+  nomComplet: string;
   appartement: string;
+  adresse: string;
   rawResponse?: string;
 }
 
@@ -27,6 +28,7 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [processingMode, setProcessingMode] = useState<'direct' | 'tesseract'>('direct');
   const [settings, setSettings] = useState<AppSettings>({
     apiKey: '',
     password: '',
@@ -96,12 +98,12 @@ export default function App() {
   const exportToCSV = () => {
     if (history.length === 0) return;
     
-    const headers = ['Date', 'Nom', 'Prénom', 'Appartement'];
+    const headers = ['Date', 'Nom Complet', 'Appartement', 'Adresse'];
     const rows = history.map(item => [
       new Date(item.timestamp).toLocaleString(),
-      item.nom,
-      item.prenom,
-      item.appartement
+      item.nomComplet,
+      item.appartement,
+      item.adresse
     ]);
 
     const csvContent = [
@@ -142,14 +144,22 @@ export default function App() {
 
   const startCamera = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      const constraints = { 
+        video: { 
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        } 
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         setIsCameraActive(true);
+        setStatus({ type: null, message: '' });
       }
     } catch (err) {
       console.error("Error accessing camera:", err);
-      setStatus({ type: 'error', message: "Impossible d'accéder à la caméra" });
+      setStatus({ type: 'error', message: "Impossible d'accéder à la caméra. Vérifiez les permissions." });
     }
   };
 
@@ -164,15 +174,77 @@ export default function App() {
 
   const capturePhoto = () => {
     if (videoRef.current && canvasRef.current) {
-      const context = canvasRef.current.getContext('2d');
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        setStatus({ type: 'error', message: "Attendez que la caméra soit prête..." });
+        return;
+      }
+
+      const context = canvas.getContext('2d');
       if (context) {
-        canvasRef.current.width = videoRef.current.videoWidth;
-        canvasRef.current.height = videoRef.current.videoHeight;
-        context.drawImage(videoRef.current, 0, 0);
-        const dataUrl = canvasRef.current.toDataURL('image/jpeg');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        context.drawImage(video, 0, 0);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
         setCapturedImage(dataUrl);
         stopCamera();
+        setStatus({ type: null, message: '' });
       }
+    }
+  };
+
+  const binarizeImage = (imageData: string): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(imageData);
+          return;
+        }
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+        
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imgData.data;
+        
+        // Simple thresholding for binarization
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+          const threshold = 128;
+          const value = gray > threshold ? 255 : 0;
+          data[i] = data[i + 1] = data[i + 2] = value;
+        }
+        
+        ctx.putImageData(imgData, 0, 0);
+        resolve(canvas.toDataURL('image/jpeg'));
+      };
+      img.src = imageData;
+    });
+  };
+
+  const extractJSON = (text: string) => {
+    try {
+      // Try direct parse first
+      return JSON.parse(text.trim());
+    } catch (e) {
+      // Try to find JSON object in the text
+      const match = text.match(/\{[\s\S]*\}/);
+      if (match) {
+        try {
+          return JSON.parse(match[0]);
+        } catch (e2) {
+          throw new Error("Impossible de décoder le format JSON de la réponse.");
+        }
+      }
+      throw new Error("La réponse de l'IA ne contient pas de données valides.");
     }
   };
 
@@ -188,57 +260,107 @@ export default function App() {
     setStatus({ type: null, message: '' });
 
     try {
-      // Remove data:image/jpeg;base64, prefix
-      const base64Image = capturedImage.split(',')[1];
+      let extractedText = '';
+      let content = '';
 
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${settings.apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": window.location.origin,
-          "X-Title": "Facteur Helper",
-        },
-        body: JSON.stringify({
-          "model": "mistralai/pixtral-large-2411",
-          "messages": [
-            {
-              "role": "user",
-              "content": [
-                {
-                  "type": "text",
-                  "text": "Analyse cette image d'adresse et extrait les informations suivantes au format JSON uniquement: { \"nom\": \"...\", \"prenom\": \"...\", \"appartement\": \"...\" }. Si une information est manquante, mets une chaîne vide. L'appartement est souvent indiqué par 'Appt', 'Apt', 'N°' ou juste un numéro après l'adresse."
-                },
-                {
-                  "type": "image_url",
-                  "image_url": {
-                    "url": `data:image/jpeg;base64,${base64Image}`
+      if (processingMode === 'tesseract') {
+        // 1. Binarize image
+        const binarized = await binarizeImage(capturedImage);
+        
+        // 2. Tesseract OCR
+        const { data: { text } } = await Tesseract.recognize(binarized, 'fra+eng');
+        extractedText = text;
+        console.log(extractedText)
+
+        if (!extractedText.trim()) {
+          throw new Error("Tesseract n'a pu extraire aucun texte de l'image.");
+        }
+
+        // 3. Send text to OpenRouter
+        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${settings.apiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": window.location.origin,
+            "X-Title": "Facteur Helper",
+          },
+          body: JSON.stringify({
+            "model": "mistralai/mistral-7b-instruct-v0.1",
+            "messages": [
+              {
+                "role": "system",
+                "content": "Tu es un assistant spécialisé dans la logistique postale française. Ton rôle est d'extraire avec précision les noms des résidents et les adresses à partir de textes bruts issus d'OCR de boîtes aux lettres.\n\nRègles CRITIQUES :\n1. 'nomComplet' est OBLIGATOIRE. 'adresse' et 'appartement' sont OPTIONNELS.\n2. INTERDICTION ABSOLUE d'inclure 'M.', 'Mme', 'Mr', 'Monsieur', 'Madame', 'Famille' ou tout NOM DE PERSONNE dans le champ 'adresse'.\n3. Le champ 'adresse' doit contenir EXCLUSIVEMENT la rue, le code postal et la ville. Si tu vois 'M. et Mme Martin 12 rue des Fleurs', alors nomComplet='Martin' et adresse='12 rue des Fleurs'.\n4. Supprime les civilités du champ 'nomComplet' également.\n5. Si l'adresse ou l'appartement ne sont pas identifiables, laisse-les vides (\"\").\n6. Réponds UNIQUEMENT en JSON."
+              },
+              {
+                "role": "user",
+                "content": `Texte OCR à analyser : "${extractedText}"\n\nExtrais les infos au format JSON : { "nomComplet": "...", "appartement": "...", "adresse": "..." }`
+              }
+            ],
+            "response_format": { "type": "json_object" }
+          })
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error?.message || 'Erreur API OpenRouter');
+        }
+
+        const data = await response.json();
+        content = data.choices[0].message.content;
+      } else {
+        // Direct IA Mode (Pixtral)
+        const base64Image = capturedImage.split(',')[1];
+        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${settings.apiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": window.location.origin,
+            "X-Title": "Facteur Helper",
+          },
+          body: JSON.stringify({
+            "model": "mistralai/pixtral-large-2411",
+            "messages": [
+              {
+                "role": "system",
+                "content": "Tu es un expert en lecture d'étiquettes de boîtes aux lettres.\n\nDirectives impératives :\n1. 'nomComplet' est la donnée MAÎTRESSE et OBLIGATOIRE. Extrais-le sans civilités (pas de 'M.', 'Mme', etc.).\n2. 'adresse' et 'appartement' sont secondaires et optionnels. \n3. L'ADRESSE ne doit JAMAIS contenir de nom de personne ni de civilité. Si tu lis 'M. et Mme BARWELL 5 Place de la Mairie', l'adresse est '5 Place de la Mairie' et le nom est 'BARWELL'.\n4. Ne mets RIEN dans 'adresse' qui ressemble à une identité humaine.\n5. Format de sortie : JSON pur."
+              },
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Analyse cette image et extrais : { \"nomComplet\": \"...\", \"appartement\": \"...\", \"adresse\": \"...\" }"
+                  },
+                  {
+                    "type": "image_url",
+                    "image_url": {
+                      "url": `data:image/jpeg;base64,${base64Image}`
+                    }
                   }
-                }
-              ]
-            }
-          ],
-          "response_format": { "type": "json_object" }
-        })
-      });
+                ]
+              }
+            ],
+            "response_format": { "type": "json_object" }
+          })
+        });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.log(errorData)
-        throw new Error(errorData.error?.message || 'Erreur API OpenRouter');
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error?.message || 'Erreur API OpenRouter');
+        }
+
+        const data = await response.json();
+        content = data.choices[0].message.content;
       }
 
-
-      const data = await response.json();
-      const content = data.choices[0].message.content;
-      const extracted = JSON.parse(content);
-
-      console.log(data)
-
+      console.log("Raw content from AI:", content);
+      const extracted = extractJSON(content);
       saveToHistory({
-        nom: extracted.nom || '',
-        prenom: extracted.prenom || '',
+        nomComplet: extracted.nomComplet || '',
         appartement: extracted.appartement || '',
+        adresse: extracted.adresse || '',
         rawResponse: content
       });
 
@@ -246,7 +368,7 @@ export default function App() {
       setCapturedImage(null);
     } catch (err: any) {
       console.error(err);
-      setStatus({ type: 'error', message: err.message || 'Échec de l\'extraction OCR' });
+      setStatus({ type: 'error', message: err.message || 'Échec de l\'extraction' });
     } finally {
       setIsProcessing(false);
     }
@@ -470,17 +592,17 @@ export default function App() {
                     {new Date(item.timestamp).toLocaleString()}
                   </div>
                   <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <div className="text-[10px] uppercase font-bold text-zinc-400">Prénom</div>
-                      <div className="font-medium text-zinc-900">{item.prenom || '-'}</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] uppercase font-bold text-zinc-400">Nom</div>
-                      <div className="font-medium text-zinc-900">{item.nom || '-'}</div>
-                    </div>
                     <div className="col-span-2">
+                      <div className="text-[10px] uppercase font-bold text-zinc-400">Nom Complet</div>
+                      <div className="font-medium text-zinc-900">{item.nomComplet || '-'}</div>
+                    </div>
+                    <div>
                       <div className="text-[10px] uppercase font-bold text-zinc-400">Appartement</div>
                       <div className="font-medium text-zinc-900">{item.appartement || '-'}</div>
+                    </div>
+                    <div className="col-span-2">
+                      <div className="text-[10px] uppercase font-bold text-zinc-400">Adresse</div>
+                      <div className="font-medium text-zinc-900 text-xs">{item.adresse || '-'}</div>
                     </div>
                   </div>
                 </motion.div>
@@ -526,6 +648,28 @@ export default function App() {
       </header>
 
       <main className="max-w-md mx-auto p-6 space-y-6">
+        {/* Mode Selection */}
+        <div className="flex bg-white p-1 rounded-2xl border border-zinc-100 shadow-sm">
+          <button 
+            onClick={() => setProcessingMode('direct')}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-bold text-sm transition-all ${
+              processingMode === 'direct' ? 'bg-zinc-900 text-white shadow-md' : 'text-zinc-400 hover:text-zinc-600'
+            }`}
+          >
+            <Cpu size={18} />
+            Direct IA
+          </button>
+          <button 
+            onClick={() => setProcessingMode('tesseract')}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-bold text-sm transition-all ${
+              processingMode === 'tesseract' ? 'bg-zinc-900 text-white shadow-md' : 'text-zinc-400 hover:text-zinc-600'
+            }`}
+          >
+            <ScanLine size={18} />
+            Tesseract + IA
+          </button>
+        </div>
+
         {/* Status Messages */}
         <AnimatePresence>
           {status.type && (
@@ -551,6 +695,7 @@ export default function App() {
                 ref={videoRef} 
                 autoPlay 
                 playsInline 
+                muted
                 className="w-full h-full object-cover"
               />
               <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-4">
@@ -636,11 +781,16 @@ export default function App() {
           }`}
         >
           {isProcessing ? (
-            <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            <div className="flex items-center gap-3">
+              <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              <span className="text-sm">
+                {processingMode === 'tesseract' ? "OCR Tesseract en cours..." : "Analyse IA en cours..."}
+              </span>
+            </div>
           ) : (
             <>
               <Key size={20} />
-              <span>Extraire Infos (Mistral)</span>
+              <span>Extraire Infos ({processingMode === 'tesseract' ? 'Tesseract' : 'Mistral'})</span>
             </>
           )}
         </button>

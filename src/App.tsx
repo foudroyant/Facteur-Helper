@@ -88,17 +88,22 @@ export default function App() {
     setShowSettings(false);
   };
 
-  const saveToHistory = (result: Omit<ExtractionResult, 'id' | 'timestamp' | 'labelId'>) => {
+  const saveToHistory = (results: Omit<ExtractionResult, 'id' | 'timestamp' | 'labelId'> | Omit<ExtractionResult, 'id' | 'timestamp' | 'labelId'>[]) => {
     if (!activeLabelId) return;
-    const newEntry: ExtractionResult = {
+    
+    const resultsArray = Array.isArray(results) ? results : [results];
+    const newEntries: ExtractionResult[] = resultsArray.map(result => ({
       ...result,
       id: crypto.randomUUID(),
       labelId: activeLabelId,
       timestamp: new Date().toISOString(),
-    };
-    const updatedHistory = [newEntry, ...history];
-    setHistory(updatedHistory);
-    localStorage.setItem('facteur_helper_history', JSON.stringify(updatedHistory));
+    }));
+    
+    setHistory(prev => {
+      const updated = [...newEntries, ...prev];
+      localStorage.setItem('facteur_helper_history', JSON.stringify(updated));
+      return updated;
+    });
   };
 
   const addLabel = (name: string) => {
@@ -385,14 +390,28 @@ export default function App() {
 
   const handleSaveEdited = () => {
     if (editingResult) {
-      saveToHistory({
-        nomComplet: editingResult.nomComplet || '',
-        appartement: editingResult.appartement || '',
-        adresse: editingResult.adresse || '',
-        rawResponse: editingResult.rawResponse
-      });
-      setEditingResult(null);
-      setStatus({ type: 'success', message: 'Résultat enregistré dans l\'historique' });
+      const names = (editingResult.nomComplet || '').split('\n').filter(name => name.trim() !== '');
+      
+      if (names.length > 0) {
+        const resultsToSave = names.map(name => ({
+          nomComplet: name.trim(),
+          appartement: editingResult.appartement || '',
+          adresse: editingResult.adresse || '',
+          rawResponse: editingResult.rawResponse
+        }));
+
+        saveToHistory(resultsToSave);
+        
+        setEditingResult(null);
+        setStatus({ 
+          type: 'success', 
+          message: names.length > 1 
+            ? `${names.length} résultats enregistrés dans l'historique` 
+            : 'Résultat enregistré dans l\'historique' 
+        });
+      } else {
+        setStatus({ type: 'error', message: 'Le nom complet est requis' });
+      }
     }
   };
 
@@ -1013,12 +1032,12 @@ const ResultPopup = ({
 
         <div className="p-6 space-y-4">
           <div>
-            <label className="block text-[10px] uppercase font-bold text-zinc-400 mb-1 ml-1">Nom Complet</label>
-            <input 
+            <label className="block text-[10px] uppercase font-bold text-zinc-400 mb-1 ml-1">Nom Complet (un par ligne pour dupliquer)</label>
+            <textarea 
               value={result.nomComplet || ''}
               onChange={(e) => onChange('nomComplet', e.target.value)}
-              className="w-full px-4 py-3 rounded-2xl border border-zinc-100 focus:ring-2 focus:ring-emerald-500 outline-none font-medium text-zinc-900"
-              placeholder="Nom de la personne"
+              className="w-full px-4 py-3 rounded-2xl border border-zinc-100 focus:ring-2 focus:ring-emerald-500 outline-none font-medium text-zinc-900 min-h-[100px] resize-none"
+              placeholder="Nom de la personne (un par ligne)"
             />
           </div>
           

@@ -1,5 +1,5 @@
 {
   "name": "Facteur Helper",
   "description": "Une application pour capturer et envoyer des images avec authentification locale.",
-  "requestFramePermissions": ["camera"]
+  "requestFramePermissions": ["camera", "microphone"]
 }

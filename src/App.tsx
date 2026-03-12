@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Image as ImageIcon, Settings, Lock, Send, CheckCircle2, AlertCircle, LogOut, Key, History, Download, Trash2, X, Cpu, ScanLine, Tag, Plus, ChevronRight, FileSpreadsheet } from 'lucide-react';
+import { Camera, Image as ImageIcon, Settings, Lock, Send, CheckCircle2, AlertCircle, LogOut, Key, History, Download, Trash2, X, Cpu, ScanLine, Tag, Plus, ChevronRight, FileSpreadsheet, Mic } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 
@@ -37,6 +37,8 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [showLabelManager, setShowLabelManager] = useState(true);
   const [editingResult, setEditingResult] = useState<Partial<ExtractionResult> | null>(null);
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [settings, setSettings] = useState<AppSettings>({
     apiKey: '',
     password: '',
@@ -54,6 +56,8 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   const [isCameraActive, setIsCameraActive] = useState(false);
 
   const [confirmAction, setConfirmAction] = useState<{ message: string; onConfirm: () => void } | null>(null);
@@ -289,6 +293,128 @@ export default function App() {
         stopCamera();
         setStatus({ type: null, message: '' });
       }
+    }
+  };
+
+  const startVoiceRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+      const selectedMimeType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
+      
+      const mediaRecorder = new MediaRecorder(stream, selectedMimeType ? { mimeType: selectedMimeType } : undefined);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        const mimeType = mediaRecorder.mimeType || 'audio/webm';
+        const blob = new Blob(audioChunksRef.current, { type: mimeType });
+        setAudioBlob(blob);
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecordingVoice(true);
+      setStatus({ type: null, message: '' });
+    } catch (err) {
+      console.error('Error accessing microphone:', err);
+      setStatus({ type: 'error', message: "Impossible d'accéder au microphone." });
+    }
+  };
+
+  const stopVoiceRecording = () => {
+    if (mediaRecorderRef.current && isRecordingVoice) {
+      mediaRecorderRef.current.stop();
+      setIsRecordingVoice(false);
+    }
+  };
+
+  const handleVoiceProcess = async () => {
+    if (!audioBlob) return;
+    if (!settings.apiKey) {
+      setStatus({ type: 'error', message: "Veuillez configurer votre clé API OpenRouter" });
+      setShowSettings(true);
+      return;
+    }
+
+    setIsProcessing(true);
+    setStatus({ type: null, message: '' });
+
+    try {
+      const reader = new FileReader();
+      const base64AudioPromise = new Promise<string>((resolve) => {
+        reader.onloadend = () => {
+          const base64 = (reader.result as string).split(',')[1];
+          resolve(base64);
+        };
+      });
+      reader.readAsDataURL(audioBlob);
+      const base64Audio = await base64AudioPromise;
+
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${settings.apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": window.location.origin,
+          "X-Title": "Facteur Helper",
+        },
+        body: JSON.stringify({
+          "model": "google/gemini-2.5-flash-lite-preview-09-2025",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_audio",
+                  "input_audio": {
+                    "data": base64Audio,
+                    "format": audioBlob.type.includes('webm') ? 'webm' : audioBlob.type.includes('ogg') ? 'ogg' : 'mp3'
+                  }
+                },
+                {
+                  "type": "text",
+                  "text": "Tu es un expert en extraction d'informations. Analyse cet audio et extrais les informations suivantes au format JSON : { \"nomComplet\": \"...\", \"appartement\": \"...\", \"adresse\": \"...\" }. Le nomComplet est obligatoire et sans civilités. L'adresse ne doit pas contenir le nom."
+                }
+              ]
+            }
+          ],
+          "response_format": { "type": "json_object" }
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error("OpenRouter Voice Error:", errorData);
+        throw new Error(errorData.error?.message || 'Erreur API OpenRouter');
+      }
+
+      const data = await response.json();
+      const content = data.choices[0].message.content;
+
+      console.log("Raw content from AI (Voice):", content);
+      const extracted = extractJSON(content);
+      setEditingResult({
+        nomComplet: extracted.nomComplet || '',
+        appartement: extracted.appartement || '',
+        adresse: extracted.adresse || '',
+        rawResponse: content
+      });
+
+      setStatus({ type: 'success', message: 'Informations extraites de la voix avec succès !' });
+      setAudioBlob(null);
+    } catch (err: any) {
+      console.error(err);
+      setStatus({ type: 'error', message: err.message || 'Échec de l\'extraction vocale' });
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -880,26 +1006,42 @@ export default function App() {
           </div>
 
           {/* Actions */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-3 gap-4">
             <button 
               onClick={startCamera}
               disabled={isCameraActive}
-              className="flex flex-col items-center justify-center gap-2 p-6 bg-white rounded-3xl border border-zinc-100 shadow-sm hover:shadow-md hover:border-emerald-100 transition-all active:scale-95"
+              className="flex flex-col items-center justify-center gap-2 p-4 bg-white rounded-3xl border border-zinc-100 shadow-sm hover:shadow-md hover:border-emerald-100 transition-all active:scale-95"
             >
-              <div className="w-12 h-12 bg-emerald-50 rounded-2xl flex items-center justify-center text-emerald-600">
-                <Camera size={24} />
+              <div className="w-10 h-10 bg-emerald-50 rounded-2xl flex items-center justify-center text-emerald-600">
+                <Camera size={20} />
               </div>
-              <span className="text-xs font-bold text-zinc-600 uppercase tracking-wider">Caméra</span>
+              <span className="text-[10px] font-bold text-zinc-600 uppercase tracking-wider">Caméra</span>
             </button>
             
             <button 
               onClick={() => fileInputRef.current?.click()}
-              className="flex flex-col items-center justify-center gap-2 p-6 bg-white rounded-3xl border border-zinc-100 shadow-sm hover:shadow-md hover:border-blue-100 transition-all active:scale-95"
+              className="flex flex-col items-center justify-center gap-2 p-4 bg-white rounded-3xl border border-zinc-100 shadow-sm hover:shadow-md hover:border-blue-100 transition-all active:scale-95"
             >
-              <div className="w-12 h-12 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600">
-                <ImageIcon size={24} />
+              <div className="w-10 h-10 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600">
+                <ImageIcon size={20} />
               </div>
-              <span className="text-xs font-bold text-zinc-600 uppercase tracking-wider">Galerie</span>
+              <span className="text-[10px] font-bold text-zinc-600 uppercase tracking-wider">Galerie</span>
+            </button>
+
+            <button 
+              onClick={isRecordingVoice ? stopVoiceRecording : startVoiceRecording}
+              className={`flex flex-col items-center justify-center gap-2 p-4 bg-white rounded-3xl border border-zinc-100 shadow-sm hover:shadow-md transition-all active:scale-95 ${
+                isRecordingVoice ? 'border-red-200 bg-red-50' : 'hover:border-purple-100'
+              }`}
+            >
+              <div className={`w-10 h-10 rounded-2xl flex items-center justify-center transition-all ${
+                isRecordingVoice ? 'bg-red-500 text-white animate-pulse' : 'bg-purple-50 text-purple-600'
+              }`}>
+                <Mic size={20} />
+              </div>
+              <span className="text-[10px] font-bold text-zinc-600 uppercase tracking-wider">
+                {isRecordingVoice ? 'Stop' : 'Voix'}
+              </span>
             </button>
             
             <input 
@@ -916,7 +1058,31 @@ export default function App() {
         </main>
 
         {/* Bottom Action Bar */}
-        <div className="fixed bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-zinc-50 via-zinc-50 to-transparent">
+        <div className="fixed bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-zinc-50 via-zinc-50 to-transparent flex flex-col gap-3">
+          {audioBlob && !isRecordingVoice && (
+            <button 
+              onClick={handleVoiceProcess}
+              disabled={isProcessing}
+              className={`w-full max-w-md mx-auto flex items-center justify-center gap-3 py-4 rounded-2xl font-bold text-lg transition-all shadow-xl ${
+                !isProcessing
+                  ? 'bg-purple-600 text-white shadow-purple-100 hover:bg-purple-700'
+                  : 'bg-zinc-200 text-zinc-400 cursor-not-allowed'
+              }`}
+            >
+              {isProcessing ? (
+                <div className="flex items-center gap-3">
+                  <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <span className="text-sm">Analyse Vocale...</span>
+                </div>
+              ) : (
+                <>
+                  <Mic size={20} />
+                  <span>Extraire Infos (Voix)</span>
+                </>
+              )}
+            </button>
+          )}
+
           <button 
             onClick={handleProcess}
             disabled={!capturedImage || isProcessing}
@@ -926,7 +1092,7 @@ export default function App() {
                 : 'bg-zinc-200 text-zinc-400 cursor-not-allowed'
             }`}
           >
-            {isProcessing ? (
+            {isProcessing && capturedImage ? (
               <div className="flex items-center gap-3">
                 <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 <span className="text-sm">Analyse IA en cours...</span>
